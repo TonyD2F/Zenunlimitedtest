@@ -10,17 +10,23 @@ A small, dependency-free OpenAI-compatible HTTP gateway for OpenCode v2 on Debia
 
 No Docker, native modules, or npm dependencies are required.
 
-## Run
+## One-command Debian/proot startup
+
+From the repository root, create and edit the private environment file once:
 
 ```sh
-cd opencode-gateway
-cp .env.example .env
-# Edit .env and set UPSTREAM_BASE_URL, UPSTREAM_API_KEY, and a unique GATEWAY_API_KEY.
-set -a
-. ./.env
-set +a
-npm start
+cp opencode-gateway/.env.example opencode-gateway/.env
+# Edit opencode-gateway/.env and set a valid UPSTREAM_API_KEY and a unique GATEWAY_API_KEY.
+chmod +x start-opencode.sh
 ```
+
+Install Node.js 18+ and OpenCode v2 if they are not already installed. Then start the gateway and OpenCode together with:
+
+```sh
+./start-opencode.sh
+```
+
+The launcher loads `opencode-gateway/.env`, starts the gateway if its health endpoint is not already available, exports the local gateway credential to OpenCode, and runs OpenCode in this repository using the included `opencode.json`. Any arguments are passed through to OpenCode. When the OpenCode process exits, a gateway started by the launcher is stopped. To run OpenCode against a different upstream model, change the selected model in `opencode.json` to one of the model IDs listed in its provider block (or edit that list to match models supported by your account).
 
 The gateway listens on `127.0.0.1:8787` by default. Check it with:
 
@@ -30,32 +36,11 @@ curl http://127.0.0.1:8787/health
 
 The health endpoint reports the upstream origin only; it does not expose credentials. The gateway requires its local bearer key on `/v1/*` requests. Do not bind it to a public interface unless you have separately secured it.
 
-## Configure OpenCode v2
+## OpenCode v2 config
 
-Add a provider entry to your OpenCode config (commonly `~/.config/opencode/opencode.json`):
+The ready-to-use repo config is [`../opencode.json`](../opencode.json). Its custom-provider entry uses the OpenCode v2 `providers` / `package` / `settings.baseURL` schema and gets the local bearer credential from `OPENCODE_GATEWAY_API_KEY`, which the launcher supplies from `GATEWAY_API_KEY`. The upstream API credential stays in `.env` and is never placed in the OpenCode config.
 
-```json
-{
-  "$schema": "https://opencode.ai/config.json",
-  "provider": {
-    "local-gateway": {
-      "npm": "@ai-sdk/openai-compatible",
-      "name": "Local Gateway",
-      "options": {
-        "baseURL": "http://127.0.0.1:8787/v1",
-        "apiKey": "replace-with-the-same-GATEWAY_API_KEY-from-.env"
-      },
-      "models": {
-        "your-model-id": {
-          "name": "Your provider model"
-        }
-      }
-    }
-  }
-}
-```
-
-Replace `your-model-id` with a model your upstream account supports. Keep provider credentials in `.env`, not in the OpenCode config. The gateway forwards `/v1/*` requests and query strings to the configured base URL; it does not pick or invent model IDs.
+For a different compatible upstream, set `UPSTREAM_BASE_URL` to its API base and configure any custom auth header/scheme it documents (`UPSTREAM_AUTH_HEADER`, `UPSTREAM_AUTH_SCHEME`). Make sure model IDs in `opencode.json` match the upstream's supported model IDs.
 
 ## Debian/proot notes
 
