@@ -54,6 +54,57 @@ test('requires a gateway key, forwards the caller key, and preserves upstream qu
   }
 });
 
+test('routes model aliases to the correct provider key and upstream model', async () => {
+  const seen = [];
+  const upstream = http.createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    seen.push({ authorization: req.headers.authorization, body: JSON.parse(Buffer.concat(chunks).toString()) });
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ok: true }));
+  });
+  const upstreamUrl = await listen(upstream);
+  const gateway = createGatewayServer({
+    routes: {
+      'openrouter-free': {
+        name: 'OpenRouter Free',
+        upstreamBaseUrl: `${upstreamUrl}/v1`,
+        upstreamModel: 'openrouter/free',
+        upstreamApiKey: 'router-secret',
+      },
+      'gemini-flash': {
+        name: 'Gemini Flash',
+        upstreamBaseUrl: `${upstreamUrl}/v1`,
+        upstreamModel: 'gemini-3.8-flash',
+        upstreamApiKey: 'gemini-secret',
+      },
+    },
+    gatewayApiKey: 'local-secret',
+  });
+  const gatewayUrl = await listen(gateway);
+
+  try {
+    for (const [alias, expectedKey, expectedModel] of [
+      ['openrouter-free', 'router-secret', 'openrouter/free'],
+      ['gemini-flash', 'gemini-secret', 'gemini-3.8-flash'],
+    ]) {
+      const response = await fetch(`${gatewayUrl}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { authorization: 'Bearer local-secret', 'content-type': 'application/json' },
+        body: JSON.stringify({ model: alias, messages: [] }),
+      });
+      assert.equal(response.status, 200);
+    }
+    assert.deepEqual(seen, [
+      { authorization: 'Bearer router-secret', body: { model: 'openrouter/free', messages: [] } },
+      { authorization: 'Bearer gemini-secret', body: { model: 'gemini-3.8-flash', messages: [] } },
+    ]);
+  } finally {
+    await close(gateway);
+    await close(upstream);
+  }
+});
+
 test('proxies streaming response chunks without buffering them into JSON', async () => {
   const upstream = http.createServer((_req, res) => {
     res.writeHead(200, { 'content-type': 'text/event-stream' });

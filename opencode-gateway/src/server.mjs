@@ -17,30 +17,36 @@ const FORWARDED_RESPONSE_HEADERS = [
 ];
 
 function readConfig(env = process.env) {
-  const upstreamBaseUrl = env.UPSTREAM_BASE_URL?.trim();
   const gatewayApiKey = env.GATEWAY_API_KEY;
-  if (!upstreamBaseUrl) throw new Error('UPSTREAM_BASE_URL is required');
   if (!gatewayApiKey) throw new Error('GATEWAY_API_KEY is required');
 
-  let parsed;
-  try {
-    parsed = new URL(upstreamBaseUrl);
-  } catch {
-    throw new Error('UPSTREAM_BASE_URL must be an absolute HTTP(S) URL');
+  const routes = {
+    'openrouter-free': {
+      name: 'OpenRouter Free',
+      upstreamBaseUrl: 'https://openrouter.ai/api/v1',
+      upstreamModel: env.OPENROUTER_MODEL?.trim() || 'openrouter/free',
+      upstreamApiKey: env.OPENROUTER_API_KEY || '',
+    },
+    'gemini-flash': {
+      name: 'Gemini Flash',
+      upstreamBaseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
+      upstreamModel: env.GEMINI_MODEL?.trim() || 'gemini-3.8-flash',
+      upstreamApiKey: env.GEMINI_API_KEY || '',
+    },
+  };
+
+  for (const [model, route] of Object.entries(routes)) {
+    const parsed = new URL(route.upstreamBaseUrl);
+    if (!['http:', 'https:'].includes(parsed.protocol)) {
+      throw new Error(`Invalid upstream URL for ${model}`);
+    }
   }
-  if (!['http:', 'https:'].includes(parsed.protocol)) {
-    throw new Error('UPSTREAM_BASE_URL must use HTTP or HTTPS');
-  }
-  if (parsed.username || parsed.password || parsed.search || parsed.hash) {
-    throw new Error('UPSTREAM_BASE_URL must not contain credentials, query, or fragment');
+  if (!Object.values(routes).some(route => route.upstreamApiKey)) {
+    throw new Error('Set OPENROUTER_API_KEY and/or GEMINI_API_KEY');
   }
 
-  const basePath = parsed.pathname.replace(/\/+$/, '');
   return {
-    upstreamBaseUrl: `${parsed.origin}${basePath}`,
-    upstreamApiKey: env.UPSTREAM_API_KEY || '',
-    upstreamAuthHeader: env.UPSTREAM_AUTH_HEADER || 'authorization',
-    upstreamAuthScheme: env.UPSTREAM_AUTH_SCHEME ?? 'Bearer',
+    routes,
     gatewayApiKey,
     bind: env.BIND || '127.0.0.1',
     port: Number(env.PORT || 8787),
@@ -96,7 +102,11 @@ export function createGatewayServer(config) {
     const requestUrl = new URL(req.url || '/', 'http://localhost');
 
     if (req.method === 'GET' && requestUrl.pathname === '/health') {
-      return sendJson(res, 200, { ok: true, upstream: new URL(config.upstreamBaseUrl).origin });
+      const providers = Object.entries(config.routes || {})
+        .filter(([, route]) => route.upstreamApiKey)
+        .map(([model, route]) => ({ model, name: route.name, upstream: new URL(route.upstreamBaseUrl).origin }));
+      const upstream = config.upstreamBaseUrl ? new URL(config.upstreamBaseUrl).origin : undefined;
+      return sendJson(res, 200, { ok: true, ...(providers.length ? { providers } : { upstream }) });
     }
 
     if (req.method === 'OPTIONS' && requestUrl.pathname.startsWith('/v1/')) {
@@ -116,10 +126,34 @@ export function createGatewayServer(config) {
     }
 
     let body;
+    let bodyJson;
     try {
       body = req.method === 'POST' ? await readBody(req) : undefined;
+      if (body && config.routes) bodyJson = JSON.parse(body.toString('utf8'));
     } catch (error) {
-      return sendJson(res, error.statusCode || 400, { error: { message: error.message } });
+      return sendJson(res, error.statusCode || 400, { error: { message: error.statusCode ? error.message : 'Request body must be valid JSON' } });
+    }
+
+    let route;
+    if (config.routes) {
+      if (req.method === 'GET' && requestUrl.pathname === '/v1/models') {
+        const data = Object.entries(config.routes)
+          .filter(([, item]) => item.upstreamApiKey)
+          .map(([id, item]) => ({ id, object: 'model', name: item.name, owned_by: 'local-gateway' }));
+        return sendJson(res, 200, { object: 'list', data });
+      }
+      const requestedModel = bodyJson?.model;
+      route = config.routes[requestedModel];
+      if (!route) {
+        return sendJson(res, 400, { error: { message: 'Unknown model. Choose openrouter-free or gemini-flash.' } });
+      }
+      if (!route.upstreamApiKey) {
+        return sendJson(res, 503, { error: { message: `Set the API key for ${route.name} in opencode-gateway/.env.` } });
+      }
+      bodyJson.model = route.upstreamModel;
+      body = Buffer.from(JSON.stringify(bodyJson));
+    } else {
+      route = config;
     }
 
     const controller = new AbortController();
@@ -133,15 +167,16 @@ export function createGatewayServer(config) {
       const value = req.headers[name];
       if (value) headers.set(name, value);
     }
-    if (config.upstreamApiKey) {
-      const authValue = config.upstreamAuthScheme
-        ? `${config.upstreamAuthScheme} ${config.upstreamApiKey}`
-        : config.upstreamApiKey;
-      headers.set(config.upstreamAuthHeader, authValue);
+    if (route.upstreamApiKey) {
+      const authScheme = route.upstreamAuthScheme ?? (config.routes ? 'Bearer' : undefined);
+      const authValue = authScheme
+        ? `${authScheme} ${route.upstreamApiKey}`
+        : route.upstreamApiKey;
+      headers.set(route.upstreamAuthHeader || 'authorization', authValue);
     }
 
     try {
-      const upstream = await fetch(upstreamUrl(config.upstreamBaseUrl, req.url || '/'), {
+      const upstream = await fetch(upstreamUrl(route.upstreamBaseUrl, req.url || '/'), {
         method: req.method,
         headers,
         body,
@@ -162,7 +197,7 @@ export function createGatewayServer(config) {
         if (!res.write(chunk)) await new Promise(resolve => res.once('drain', resolve));
       }
       res.end();
-    } catch (error) {
+    } catch {
       if (res.destroyed || controller.signal.aborted) return;
       sendJson(res, 502, { error: { message: 'Upstream request failed' } });
     }
@@ -175,7 +210,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     const server = createGatewayServer(config);
     server.listen(config.port, config.bind, () => {
       console.log(`OpenCode local gateway listening at http://${config.bind}:${config.port}`);
-      console.log(`Forwarding to ${config.upstreamBaseUrl} (credentials and quotas are not modified)`);
+      console.log('Configured providers: OpenRouter and Gemini (requests use their own keys and quotas)');
     });
     server.on('error', error => {
       console.error(`Gateway server error: ${error.message}`);

@@ -9,8 +9,12 @@ if [[ -f .env ]]; then
   set +a
 fi
 
-if [[ -z "${UPSTREAM_BASE_URL:-}" || -z "${GATEWAY_API_KEY:-}" ]]; then
-  echo "Missing required environment variables. Copy .env.example to .env and fill in values." >&2
+if [[ ( -z "${OPENROUTER_API_KEY:-}" || "$OPENROUTER_API_KEY" == replace-* ) && ( -z "${GEMINI_API_KEY:-}" || "$GEMINI_API_KEY" == replace-* ) ]]; then
+  echo "Set at least one valid OPENROUTER_API_KEY or GEMINI_API_KEY in .env." >&2
+  exit 1
+fi
+if [[ -z "${GATEWAY_API_KEY:-}" || "$GATEWAY_API_KEY" == replace-* ]]; then
+  echo "Set a unique GATEWAY_API_KEY in .env." >&2
   exit 1
 fi
 

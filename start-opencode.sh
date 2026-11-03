@@ -15,8 +15,8 @@ set -a
 . "$ENV_FILE"
 set +a
 
-if [[ -z "${UPSTREAM_BASE_URL:-}" || -z "${UPSTREAM_API_KEY:-}" || "$UPSTREAM_API_KEY" == replace-* ]]; then
-  echo "Set UPSTREAM_BASE_URL and a valid UPSTREAM_API_KEY in opencode-gateway/.env." >&2
+if [[ ( -z "${OPENROUTER_API_KEY:-}" || "$OPENROUTER_API_KEY" == replace-* ) && ( -z "${GEMINI_API_KEY:-}" || "$GEMINI_API_KEY" == replace-* ) ]]; then
+  echo "Set at least one valid OPENROUTER_API_KEY or GEMINI_API_KEY in opencode-gateway/.env." >&2
   exit 1
 fi
 if [[ -z "${GATEWAY_API_KEY:-}" || "$GATEWAY_API_KEY" == replace-* ]]; then
